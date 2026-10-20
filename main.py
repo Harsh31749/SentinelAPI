@@ -139,7 +139,7 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
         conn.close()
         return response
 
-app = FastAPI(title="Enterprise Protected API & Gateway")
+app = FastAPI(title="SentinelAPI — Protected Core Service & Gateway")
 app.add_middleware(TelemetryMiddleware)
 
 @app.get("/api/v1/users")

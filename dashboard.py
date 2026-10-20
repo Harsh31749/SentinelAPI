@@ -11,7 +11,7 @@ DB_FILE = "telemetry.db"
 init_semantic_db()
 
 st.set_page_config(page_title="AI-Based API Security Analyzer", layout="wide")
-st.title("🛡️ AI-Based API Security Analyzer")
+st.title("🛡️ SentinelAPI — AI-Based API Security Analyzer")
 st.caption("Telemetry Ingestion • Shadow API Discovery • Isolation Forest + PyTorch Autoencoder • BOLA/BFLA Fuzzer • Gateway Mitigation")
 
 # Sidebar Controls
