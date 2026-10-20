@@ -1,0 +1,15 @@
+# API & Ingestion
+fastapi
+uvicorn[standard]
+pydantic
+
+# Machine Learning & Data Processing
+scikit-learn
+pandas
+numpy
+
+# Presentation Dashboard
+streamlit
+
+# Synthetic Traffic Generation
+requests

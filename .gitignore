@@ -1,0 +1,17 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# Local SQLite databases and logs
+*.db
+*.db-journal
+*.sqlite3
+*.log
+*.jsonl
+
+# Streamlit config / cache
+.streamlit/

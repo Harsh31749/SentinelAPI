@@ -1,0 +1,23 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Enterprise Core API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/users": {
+      "get": { "summary": "List all users" },
+      "post": { "summary": "Create a user" }
+    },
+    "/api/v1/users/{user_id}": {
+      "get": { "summary": "Get user profile by ID" }
+    },
+    "/api/v1/products": {
+      "get": { "summary": "List products" }
+    },
+    "/api/v1/orders": {
+      "get": { "summary": "List orders" },
+      "post": { "summary": "Create an order" }
+    }
+  }
+}
