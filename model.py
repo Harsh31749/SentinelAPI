@@ -40,7 +40,7 @@ def run_ai_analysis():
         return 0.0
 
     # 1. Behavioral Feature Engineering
-    
+
     df["is_error"] = (df["status_code"] >= 400).astype(int)
 
     # Use only the previous 9 requests from the same actor.
@@ -70,7 +70,7 @@ def run_ai_analysis():
     X_test_scaled = scaler.transform(X_test_raw)
 
 
-    
+
     # 2. Model A: Fit Isolation Forest on training data only
     iso_forest = IsolationForest(
         n_estimators=100,
