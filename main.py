@@ -32,12 +32,19 @@ def normalize_path(path: str) -> str:
 
 
 def redact_and_hash_actor(request: Request) -> tuple[str, str]:
-    auth_header = request.headers.get("Authorization", "")
-    client_host = request.client.host if request.client else "127.0.0.1"
-    actor_id = request.headers.get("X-Actor-ID", client_host)
-    actor_hash = hashlib.sha256(actor_id.encode()).hexdigest()[:12]
+    """Hash the demo actor identifier and redact credentials from logs.
 
-    if auth_header.startswith("Bearer "):
+    X-Actor-ID is caller-controlled and is NOT authenticated identity.
+    Use verified authentication claims before production deployment.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    client_host = request.client.host if request.client else "unknown"
+
+    actor_id = request.headers.get("X-Actor-ID", client_host)
+    actor_id = actor_id.strip() or client_host
+    actor_hash = hashlib.sha256(actor_id.encode("utf-8")).hexdigest()[:12]
+
+    if auth_header.lower().startswith("bearer "):
         auth_masked = "Bearer [REDACTED]"
     elif auth_header:
         auth_masked = "[REDACTED_SECRET]"
