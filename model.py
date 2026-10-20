@@ -1,5 +1,6 @@
 import sqlite3
 import time
+
 import numpy as np
 import pandas as pd
 import torch
@@ -7,27 +8,27 @@ import torch.nn as nn
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
-DB_FILE = "telemetry.db"
+from config import DB_PATH
+
+DB_FILE = str(DB_PATH)
+
 
 # Define PyTorch Autoencoder Architecture
 class TelemetryAutoencoder(nn.Module):
     def __init__(self, input_dim: int):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 16),
-            nn.ReLU(),
-            nn.Linear(16, 2)
+            nn.Linear(input_dim, 16), nn.ReLU(), nn.Linear(16, 2)
         )
         self.decoder = nn.Sequential(
-            nn.Linear(2, 16),
-            nn.ReLU(),
-            nn.Linear(16, input_dim)
+            nn.Linear(2, 16), nn.ReLU(), nn.Linear(16, input_dim)
         )
 
     def forward(self, x):
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
         return decoded
+
 
 def run_ai_analysis():
     start_time = time.perf_counter()
@@ -95,7 +96,9 @@ def run_ai_analysis():
 
         if row["is_shadow"] == 1:
             score += 55
-            reasons.append(f"Undocumented Shadow API ({row['method']} {row['normalized_path']})")
+            reasons.append(
+                f"Undocumented Shadow API ({row['method']} {row['normalized_path']})"
+            )
 
         if if_preds[idx] == -1:
             score += 25
@@ -103,18 +106,33 @@ def run_ai_analysis():
 
         if row["autoencoder_mse"] > mse_threshold:
             score += 20
-            reasons.append(f"Autoencoder high reconstruction error (MSE: {row['autoencoder_mse']})")
+            reasons.append(
+                f"Autoencoder high reconstruction error (MSE: {row['autoencoder_mse']})"
+            )
 
         if row["actor_error_rate"] >= 0.4:
             score += 40
-            reasons.append(f"Sustained 4xx/5xx probing ({int(row['actor_error_rate']*100)}% error rate)")
+            reasons.append(
+                f"Sustained 4xx/5xx probing "
+                f"({int(row['actor_error_rate'] * 100)}% error rate)"
+            )
 
         score = min(score, 100)
-        sev = "Critical" if score >= 75 else "High" if score >= 50 else "Medium" if score >= 30 else "Low"
+        sev = (
+            "Critical"
+            if score >= 75
+            else "High"
+            if score >= 50
+            else "Medium"
+            if score >= 30
+            else "Low"
+        )
 
         risk_scores.append(score)
         severities.append(sev)
-        explanations.append("; ".join(reasons) if reasons else "Normal baseline activity")
+        explanations.append(
+            "; ".join(reasons) if reasons else "Normal baseline activity"
+        )
 
     df["risk_score"] = risk_scores
     df["severity"] = severities
@@ -122,24 +140,28 @@ def run_ai_analysis():
 
     cursor = conn.cursor()
     for _, row in df.iterrows():
-        cursor.execute("""
+        cursor.execute(
+            """
             UPDATE api_logs
             SET anomaly_score = ?, autoencoder_mse = ?, is_anomaly = ?,
                 risk_score = ?, severity = ?, explanation = ?
             WHERE id = ?
-        """, (
-            float(row["anomaly_score"]),
-            float(row["autoencoder_mse"]),
-            int(row["is_anomaly"]),
-            int(row["risk_score"]),
-            row["severity"],
-            row["explanation"],
-            int(row["id"])
-        ))
+        """,
+            (
+                float(row["anomaly_score"]),
+                float(row["autoencoder_mse"]),
+                int(row["is_anomaly"]),
+                int(row["risk_score"]),
+                row["severity"],
+                row["explanation"],
+                int(row["id"]),
+            ),
+        )
     conn.commit()
     conn.close()
 
     return round((time.perf_counter() - start_time) * 1000, 2)
+
 
 if __name__ == "__main__":
     ms = run_ai_analysis()
