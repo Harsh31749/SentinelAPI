@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import time
+import uuid
 from contextlib import asynccontextmanager, closing
 from datetime import UTC, datetime
 
@@ -42,7 +43,7 @@ def normalize_path(path: str) -> str:
     return re.sub(r"/users/\d+", "/users/{user_id}", path)
 
 
-def authenticate_and_hash_actor(request: Request) -> tuple[str, str]:
+def authenticate_and_hash_actor(request: Request,) -> tuple[str, str, str]:
     """Validate a JWT and return its hashed subject and a redacted auth label.
 
     Actor identity comes only from the verified JWT subject. X-Actor-ID is
@@ -86,7 +87,16 @@ def authenticate_and_hash_actor(request: Request) -> tuple[str, str]:
     actor_id = subject.strip()
     actor_hash = hashlib.sha256(actor_id.encode("utf-8")).hexdigest()[:12]
 
-    return actor_hash, "Bearer [REDACTED]"
+    if actor_id.startswith("semantic_fuzzer_"):
+        traffic_source = "semantic_fuzzer"
+    elif actor_id.startswith(
+        ("normal_user_", "attacker_shadow_scanner", "attacker_bola_scraper")
+    ):
+        traffic_source = "attack_simulator"
+    else:
+        traffic_source = "other"
+
+    return actor_hash, "Bearer [REDACTED]", traffic_source
 
 
 def get_policy_action(actor_hash: str) -> str | None:
@@ -104,6 +114,7 @@ def get_policy_action(actor_hash: str) -> str | None:
 def write_telemetry(
     *,
     timestamp: str,
+    request_id: str,
     actor_hash: str,
     auth_masked: str,
     method: str,
@@ -114,6 +125,7 @@ def write_telemetry(
     latency_ms: float,
     is_shadow: int,
     ground_truth: int,
+    traffic_source: str,
 ) -> None:
     """Persist one request event to the telemetry database."""
     with closing(sqlite3.connect(DB_FILE, timeout=10)) as conn:
@@ -121,13 +133,14 @@ def write_telemetry(
         conn.execute(
             """
             INSERT INTO api_logs (
-                timestamp, actor_hash, auth_masked, method, raw_path,
+                timestamp, request_id, actor_hash, auth_masked, method, raw_path,
                 normalized_path, status_code, payload_size, latency_ms,
-                is_shadow, ground_truth
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_shadow, ground_truth, traffic_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 timestamp,
+                request_id,
                 actor_hash,
                 auth_masked,
                 method,
@@ -138,6 +151,7 @@ def write_telemetry(
                 latency_ms,
                 is_shadow,
                 ground_truth,
+                traffic_source,
             ),
         )
         conn.commit()
@@ -151,7 +165,9 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         try:
-            actor_hash, auth_masked = authenticate_and_hash_actor(request)
+            actor_hash, auth_masked, traffic_source = (
+                authenticate_and_hash_actor(request)
+            )
         except InvalidBearerToken:
             return JSONResponse(
                 status_code=401,
@@ -167,7 +183,7 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
                 status_code=503,
                 content={"detail": "Authentication service unavailable"},
             )
-
+        request_id = str(uuid.uuid4())
         start_perf = time.perf_counter()
 
         # Fail closed if the policy database cannot be checked.
@@ -200,12 +216,13 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
 
         content_length = response.headers.get("content-length")
         payload_size = int(content_length) if content_length else 0
-        ground_truth = int(request.headers.get("X-Sim-Attack") == "1" or is_shadow == 1)
+        ground_truth = 0
 
         # Log persistence failures without replacing the endpoint response.
         try:
             write_telemetry(
                 timestamp=datetime.now(UTC).isoformat(),
+                request_id=request_id,
                 actor_hash=actor_hash,
                 auth_masked=auth_masked,
                 method=method,
@@ -216,10 +233,11 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
                 latency_ms=latency_ms,
                 is_shadow=is_shadow,
                 ground_truth=ground_truth,
+                traffic_source=traffic_source,
             )
         except sqlite3.Error:
             logger.exception("Failed to persist API telemetry")
-
+        response.headers["X-Request-ID"] = request_id
         return response
 
 

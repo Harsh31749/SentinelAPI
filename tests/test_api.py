@@ -229,3 +229,53 @@ def test_missing_jwt_secret_fails_closed(client, monkeypatch):
     )
 
     assert response.status_code == 503
+
+
+def test_client_cannot_set_ground_truth_with_request_header(client):
+    response = client.get(
+        "/api/v1/users",
+        headers={
+            **auth_headers("benchmark-header-test"),
+            "X-Sim-Attack": "1",
+        },
+    )
+
+    assert response.status_code == 200
+
+    with sqlite3.connect(main.DB_FILE) as conn:
+        event = conn.execute(
+            """
+            SELECT ground_truth, traffic_source
+            FROM api_logs
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert event == (0, "other")
+
+
+def test_request_id_matches_telemetry_record(client):
+    response = client.get(
+        "/api/v1/users",
+        headers=auth_headers("request-id-test"),
+    )
+
+    assert response.status_code == 200
+
+    request_id = response.headers.get("X-Request-ID")
+    assert request_id is not None
+    assert len(request_id) == 36
+
+    with sqlite3.connect(main.DB_FILE) as conn:
+        row = conn.execute(
+            """
+            SELECT request_id
+            FROM api_logs
+            WHERE request_id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+
+    assert row == (request_id,)
+

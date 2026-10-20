@@ -1,9 +1,13 @@
+
 import os
 import random
+import sqlite3
 import time
 
 import jwt
 import requests
+
+from config import DB_PATH
 
 BASE_URL = "http://127.0.0.1:8000"
 JWT_SECRET = os.getenv("SENTINEL_JWT_SECRET", "")
@@ -15,8 +19,7 @@ def make_token(subject: str) -> str:
     """Create a short-lived JWT for a local security demonstration."""
     if len(JWT_SECRET.encode("utf-8")) < 32:
         raise RuntimeError(
-            "SENTINEL_JWT_SECRET must be set to a secret of at least 32 bytes. "
-            "Configure it in PowerShell before running this script."
+            "SENTINEL_JWT_SECRET must contain at least 32 bytes."
         )
 
     now = int(time.time())
@@ -30,12 +33,42 @@ def make_token(subject: str) -> str:
     return jwt.encode(claims, JWT_SECRET, algorithm="HS256")
 
 
-def send_request(method: str, path: str, subject: str, is_attack: bool) -> None:
-    """Send one request with a valid JWT and simulation metadata."""
+
+def label_request_event(request_id: str, label: int) -> None:
+    """Label the telemetry event identified by the API response request ID."""
+    if not request_id:
+        raise RuntimeError("API response did not include X-Request-ID.")
+
+    with sqlite3.connect(DB_PATH, timeout=10) as conn:
+        conn.execute("PRAGMA busy_timeout = 10000")
+        cursor = conn.execute(
+            """
+            UPDATE api_logs
+            SET ground_truth = ?
+            WHERE request_id = ?
+            """,
+            (label, request_id),
+        )
+
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "Expected exactly one telemetry event for request ID "
+                f"{request_id}; updated {cursor.rowcount} rows. "
+                "The event was not labeled as expected."
+            )
+
+
+
+
+def send_request(
+    method: str,
+    path: str,
+    subject: str,
+    is_attack: bool,
+) -> None:
     headers = {
         "Authorization": f"Bearer {make_token(subject)}",
         "X-Actor-ID": subject,
-        "X-Sim-Attack": "1" if is_attack else "0",
     }
 
     try:
@@ -46,8 +79,20 @@ def send_request(method: str, path: str, subject: str, is_attack: bool) -> None:
             timeout=5,
         )
         print(f"{method} {path} -> HTTP {response.status_code}")
+
+        request_id = response.headers.get("X-Request-ID")
+        if not request_id:
+            print(
+                f"Warning: no X-Request-ID for {method} {path}; "
+                "this request was not labeled."
+            )
+            return
+
+        label_request_event(request_id, label=int(is_attack))
+
     except requests.RequestException as exc:
         print(f"Request failed for {method} {path}: {exc}")
+
 
 
 def simulate_traffic():
@@ -63,8 +108,12 @@ def simulate_traffic():
 
     for i in range(120):
         method, path = random.choice(normal_endpoints)
-        subject = f"normal_user_{i % 5}"
-        send_request(method, path, subject, is_attack=False)
+        send_request(
+            method,
+            path,
+            f"normal_user_{i % 5}",
+            is_attack=False,
+        )
         time.sleep(0.01)
 
     print("2. Simulating Shadow API discovery and exploitation...")

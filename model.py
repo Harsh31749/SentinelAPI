@@ -40,32 +40,82 @@ def run_ai_analysis():
         return 0.0
 
     # 1. Behavioral Feature Engineering
+    
     df["is_error"] = (df["status_code"] >= 400).astype(int)
-    df["actor_error_rate"] = df.groupby("actor_hash")["is_error"].transform(
-        lambda s: s.rolling(10, min_periods=1).mean()
+
+    # Use only the previous 9 requests from the same actor.
+    # The current request's outcome is excluded.
+    df["actor_error_rate"] = (
+        df.groupby("actor_hash", sort=False)["is_error"]
+        .transform(
+            lambda s: s.shift(1).rolling(9, min_periods=1).mean()
+        )
+        .fillna(0.0)
     )
+
 
     feature_cols = ["payload_size", "latency_ms", "is_error", "actor_error_rate"]
     X_raw = df[feature_cols].fillna(0).values
 
+    # Chronological split: earlier events train the models;
+    # later events are held out for evaluation.
+    split_idx = int(len(df) * 0.8)
+    split_idx = max(5, min(split_idx, len(df) - 1))
+
+    X_train_raw = X_raw[:split_idx]
+    X_test_raw = X_raw[split_idx:]
+
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_raw)
+    X_train_scaled = scaler.fit_transform(X_train_raw)
+    X_test_scaled = scaler.transform(X_test_raw)
 
-    # 2. Model A: Unsupervised Isolation Forest
-    iso_forest = IsolationForest(n_estimators=100, contamination=0.14, random_state=42)
-    if_preds = iso_forest.fit_predict(X_scaled)
-    if_scores = iso_forest.decision_function(X_scaled)
 
-    # 3. Model B: Deep Learning Autoencoder (Trained on non-shadow baseline)
+    
+    # 2. Model A: Fit Isolation Forest on training data only
+    iso_forest = IsolationForest(
+        n_estimators=100,
+        contamination=0.14,
+        random_state=42,
+    )
+    iso_forest.fit(X_train_scaled)
+
+    # Score both partitions without refitting the model.
+    if_preds = np.concatenate(
+        [
+            iso_forest.predict(X_train_scaled),
+            iso_forest.predict(X_test_scaled),
+        ]
+    )
+    if_scores = np.concatenate(
+        [
+            iso_forest.decision_function(X_train_scaled),
+            iso_forest.decision_function(X_test_scaled),
+        ]
+    )
+
+    # 3. Model B: Autoencoder trained on training-period baseline only
     torch.manual_seed(42)
-    normal_mask = (df["is_shadow"] == 0) & (df["actor_error_rate"] < 0.3)
-    X_train = X_scaled[normal_mask] if normal_mask.sum() >= 5 else X_scaled
+
+    train_df = df.iloc[:split_idx]
+    normal_mask = (
+        (train_df["is_shadow"] == 0)
+        & (train_df["actor_error_rate"] < 0.3)
+    )
+
+    X_autoencoder_train = (
+        X_train_scaled[normal_mask.to_numpy()]
+        if normal_mask.sum() >= 5
+        else X_train_scaled
+    )
 
     model = TelemetryAutoencoder(input_dim=len(feature_cols))
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.02)
 
-    X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+    X_train_tensor = torch.tensor(
+        X_autoencoder_train, dtype=torch.float32
+    )
+
     model.train()
     for _ in range(60):
         optimizer.zero_grad()
@@ -74,18 +124,37 @@ def run_ai_analysis():
         loss.backward()
         optimizer.step()
 
-    # Calculate Reconstruction Error (MSE) across all traffic
+    # Calculate reconstruction errors without training on the test partition.
     model.eval()
     with torch.no_grad():
-        X_all_tensor = torch.tensor(X_scaled, dtype=torch.float32)
-        reconstructed = model(X_all_tensor)
-        mse_scores = torch.mean((X_all_tensor - reconstructed) ** 2, dim=1).numpy()
+        X_train_tensor_all = torch.tensor(
+            X_train_scaled, dtype=torch.float32
+        )
+        X_test_tensor = torch.tensor(
+            X_test_scaled, dtype=torch.float32
+        )
 
-    mse_threshold = float(np.percentile(mse_scores, 85))
+        train_reconstructed = model(X_train_tensor_all)
+        test_reconstructed = model(X_test_tensor)
+
+        train_mse = torch.mean(
+            (X_train_tensor_all - train_reconstructed) ** 2, dim=1
+        ).numpy()
+        test_mse = torch.mean(
+            (X_test_tensor - test_reconstructed) ** 2, dim=1
+        ).numpy()
+
+    mse_scores = np.concatenate([train_mse, test_mse])
+
+    # Threshold is derived from training errors only.
+    mse_threshold = float(np.percentile(train_mse, 85))
 
     df["anomaly_score"] = np.round(if_scores, 4)
     df["autoencoder_mse"] = np.round(mse_scores, 4)
-    df["is_anomaly"] = np.where((if_preds == -1) | (mse_scores > mse_threshold), 1, 0)
+    df["is_anomaly"] = np.where(
+        (if_preds == -1) | (mse_scores > mse_threshold), 1, 0
+    )
+
 
     # 4. Hybrid Risk Scoring & Explainable Alert Generation
     risk_scores, severities, explanations = [], [], []
