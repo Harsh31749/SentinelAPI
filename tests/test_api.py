@@ -1,9 +1,63 @@
+import hashlib
 import sqlite3
+import time
 
+import jwt
+import pytest
 from fastapi.testclient import TestClient
 
 import main
 from database import init_db
+
+TEST_JWT_SECRET = "test-only-secret-for-sentinelapi-32-bytes-minimum"
+
+
+@pytest.fixture(autouse=True)
+def configure_test_jwt(monkeypatch):
+    """Provide a deterministic signing secret for API tests."""
+    monkeypatch.setenv("SENTINEL_JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setenv("SENTINEL_JWT_ISSUER", "sentinelapi-local")
+    monkeypatch.setenv("SENTINEL_JWT_AUDIENCE", "sentinelapi")
+
+
+def make_token(
+    subject: str = "test-actor",
+    *,
+    secret: str = TEST_JWT_SECRET,
+    expires_in: int = 300,
+    issuer: str = "sentinelapi-local",
+    audience: str = "sentinelapi",
+) -> str:
+    now = int(time.time())
+    claims = {
+        "sub": subject,
+        "iss": issuer,
+        "aud": audience,
+        "iat": now,
+        "exp": now + expires_in,
+    }
+    return jwt.encode(claims, secret, algorithm="HS256")
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    """Create a test client backed by an isolated temporary database."""
+    db_path = tmp_path / "jwt-api-test.db"
+
+    monkeypatch.setattr(main, "init_db", lambda: init_db(db_path))
+    monkeypatch.setattr(main, "DB_FILE", str(db_path))
+
+    with TestClient(main.app) as test_client:
+        yield test_client
+
+
+def auth_headers(subject: str = "test-actor") -> dict[str, str]:
+    return {"Authorization": f"Bearer {make_token(subject)}"}
+
+
+def hash_actor(subject: str) -> str:
+    """Match the actor hash used by SentinelAPI policies and telemetry."""
+    return hashlib.sha256(subject.encode("utf-8")).hexdigest()[:12]
 
 
 def test_list_users_records_telemetry(tmp_path, monkeypatch):
@@ -14,7 +68,10 @@ def test_list_users_records_telemetry(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_FILE", str(db_path))
 
     with TestClient(main.app) as client:
-        response = client.get("/api/v1/users")
+        response = client.get(
+            "/api/v1/users",
+            headers=auth_headers("student-demo"),
+        )
 
     assert response.status_code == 200
     assert response.json() == [
@@ -34,16 +91,13 @@ def test_list_users_records_telemetry(tmp_path, monkeypatch):
 
 
 def test_blocked_actor_receives_403_and_is_logged(tmp_path, monkeypatch):
-    import hashlib
-
     db_path = tmp_path / "blocked-api-test.db"
     monkeypatch.setattr(main, "init_db", lambda: init_db(db_path))
     monkeypatch.setattr(main, "DB_FILE", str(db_path))
 
-    actor_id = "blocked-test-actor"
-    actor_hash = hashlib.sha256(actor_id.encode()).hexdigest()[:12]
+    subject = "blocked-test-actor"
+    actor_hash = hash_actor(subject)
 
-    # Startup creates the schema; seed the policy before making a request.
     init_db(db_path)
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -57,7 +111,10 @@ def test_blocked_actor_receives_403_and_is_logged(tmp_path, monkeypatch):
     with TestClient(main.app) as client:
         response = client.get(
             "/api/v1/users",
-            headers={"X-Actor-ID": actor_id},
+            headers={
+                "Authorization": f"Bearer {make_token(subject)}",
+                "X-Actor-ID": "spoofed-different-actor",
+            },
         )
 
     assert response.status_code == 403
@@ -88,7 +145,10 @@ def test_policy_lookup_failure_returns_503(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(main, "get_policy_action", fail_policy_lookup)
 
     with TestClient(main.app) as client:
-        response = client.get("/api/v1/users")
+        response = client.get(
+            "/api/v1/users",
+            headers=auth_headers("student-demo"),
+        )
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Security policy service unavailable"}
@@ -112,8 +172,60 @@ def test_telemetry_failure_preserves_endpoint_response(tmp_path, monkeypatch, ca
     monkeypatch.setattr(main, "write_telemetry", fail_telemetry_write)
 
     with TestClient(main.app) as client:
-        response = client.get("/api/v1/users")
+        response = client.get(
+            "/api/v1/users",
+            headers=auth_headers("student-demo"),
+        )
 
     assert response.status_code == 200
     assert response.json()[0]["name"] == "Alice"
     assert "Failed to persist API telemetry" in caplog.text
+
+
+def test_missing_bearer_token_is_rejected(client):
+    response = client.get("/api/v1/users")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_invalid_bearer_token_is_rejected(client):
+    response = client.get(
+        "/api/v1/users",
+        headers={"Authorization": "Bearer not-a-valid-jwt"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_expired_jwt_is_rejected(client):
+    token = make_token("test-actor", expires_in=-60)
+
+    response = client.get(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_wrong_issuer_is_rejected(client):
+    token = make_token("test-actor", issuer="untrusted-issuer")
+
+    response = client.get(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_missing_jwt_secret_fails_closed(client, monkeypatch):
+    monkeypatch.delenv("SENTINEL_JWT_SECRET")
+
+    response = client.get(
+        "/api/v1/users",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 503

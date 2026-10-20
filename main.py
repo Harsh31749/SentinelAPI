@@ -1,12 +1,14 @@
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import time
 from contextlib import asynccontextmanager, closing
 from datetime import UTC, datetime
 
+import jwt
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -17,6 +19,15 @@ from database import init_db
 DB_FILE = str(DB_PATH)
 SPEC_FILE = str(SPEC_PATH)
 logger = logging.getLogger(__name__)
+
+
+class InvalidBearerToken(Exception):
+    """Raised when a request has missing or invalid Bearer credentials."""
+
+
+class JWTConfigurationError(Exception):
+    """Raised when the JWT signing secret is missing or too weak."""
+
 
 with open(SPEC_FILE, encoding="utf-8") as f:
     OPENAPI_SPEC = json.load(f)
@@ -31,27 +42,51 @@ def normalize_path(path: str) -> str:
     return re.sub(r"/users/\d+", "/users/{user_id}", path)
 
 
-def redact_and_hash_actor(request: Request) -> tuple[str, str]:
-    """Hash the demo actor identifier and redact credentials from logs.
+def authenticate_and_hash_actor(request: Request) -> tuple[str, str]:
+    """Validate a JWT and return its hashed subject and a redacted auth label.
 
-    X-Actor-ID is caller-controlled and is NOT authenticated identity.
-    Use verified authentication claims before production deployment.
+    Actor identity comes only from the verified JWT subject. X-Actor-ID is
+    intentionally ignored because clients can freely modify that header.
     """
     auth_header = request.headers.get("Authorization", "")
-    client_host = request.client.host if request.client else "unknown"
+    parts = auth_header.split()
 
-    actor_id = request.headers.get("X-Actor-ID", client_host)
-    actor_id = actor_id.strip() or client_host
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise InvalidBearerToken
+
+    token = parts[1]
+    secret = os.getenv("SENTINEL_JWT_SECRET", "")
+
+    # HS256 uses a 256-bit (32-byte) minimum secret for this application.
+    if len(secret.encode("utf-8")) < 32:
+        raise JWTConfigurationError
+
+    issuer = os.getenv("SENTINEL_JWT_ISSUER", "sentinelapi-local")
+    audience = os.getenv("SENTINEL_JWT_AUDIENCE", "sentinelapi")
+
+    try:
+        claims = jwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            issuer=issuer,
+            audience=audience,
+            options={
+                "require": ["sub", "iss", "aud", "iat", "exp"],
+            },
+        )
+    except jwt.InvalidTokenError as exc:
+        raise InvalidBearerToken from exc
+
+    subject = claims.get("sub")
+    if not isinstance(subject, str) or not subject.strip():
+        raise InvalidBearerToken
+
+    # Preserve the existing gateway policy and telemetry hash format.
+    actor_id = subject.strip()
     actor_hash = hashlib.sha256(actor_id.encode("utf-8")).hexdigest()[:12]
 
-    if auth_header.lower().startswith("bearer "):
-        auth_masked = "Bearer [REDACTED]"
-    elif auth_header:
-        auth_masked = "[REDACTED_SECRET]"
-    else:
-        auth_masked = "None"
-
-    return actor_hash, auth_masked
+    return actor_hash, "Bearer [REDACTED]"
 
 
 def get_policy_action(actor_hash: str) -> str | None:
@@ -115,7 +150,24 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
         if path in ["/docs", "/openapi.json", "/redoc", "/favicon.ico"]:
             return await call_next(request)
 
-        actor_hash, auth_masked = redact_and_hash_actor(request)
+        try:
+            actor_hash, auth_masked = authenticate_and_hash_actor(request)
+        except InvalidBearerToken:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or missing Bearer token"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        except JWTConfigurationError:
+            logger.error(
+                "JWT authentication is unavailable: "
+                "SENTINEL_JWT_SECRET must be at least 32 bytes"
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Authentication service unavailable"},
+            )
+
         start_perf = time.perf_counter()
 
         # Fail closed if the policy database cannot be checked.
