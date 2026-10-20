@@ -1,4 +1,3 @@
-
 import sqlite3
 
 import numpy as np
@@ -13,7 +12,6 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 from config import DB_PATH
@@ -72,20 +70,31 @@ def main():
     feature_cols = [
         "payload_size",
         "latency_ms",
+        "is_error",
         "actor_error_rate",
     ]
     X = df[feature_cols].fillna(0).to_numpy(dtype=float)
     y = df["ground_truth"].to_numpy(dtype=int)
 
     # Stratified split keeps both classes in both partitions.
+    # Chronological holdout: train on earlier events, test on later events.
     indices = np.arange(len(df))
-    train_idx, test_idx = train_test_split(
-        indices,
-        test_size=0.25,
-        random_state=42,
-        stratify=y,
-    )
+    split_idx = int(len(df) * 0.75)
+    train_idx = indices[:split_idx]
+    test_idx = indices[split_idx:]
 
+    if len(train_idx) == 0 or len(test_idx) == 0:
+        raise RuntimeError("Not enough events for a chronological holdout.")
+
+    if (
+        np.unique(y[train_idx]).size < 2
+        or np.unique(y[test_idx]).size < 2
+    ):
+        raise RuntimeError(
+            "Chronological split does not contain both classes in training "
+            "and test data. Collect more interleaved benchmark traffic before "
+            "calculating comparative metrics."
+        )
     # Fit preprocessing only on the training partition.
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X[train_idx])
