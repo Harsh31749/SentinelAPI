@@ -19,6 +19,9 @@ JWT_SECRET = os.getenv("SENTINEL_JWT_SECRET", "")
 JWT_ISSUER = os.getenv("SENTINEL_JWT_ISSUER", "sentinelapi-local")
 JWT_AUDIENCE = os.getenv("SENTINEL_JWT_AUDIENCE", "sentinelapi")
 
+def init_semantic_db() -> None:
+    """Initialize the database tables used by the semantic tester and dashboard."""
+    init_db()
 
 def make_token(subject: str) -> str:
     """Create a short-lived JWT for a local security demonstration."""
