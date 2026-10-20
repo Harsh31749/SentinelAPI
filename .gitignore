@@ -1,17 +1,33 @@
-# Python bytecode & cache
+# Python bytecode and cache
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Virtual environments
 .venv/
 env/
 venv/
 
-# Local SQLite databases and logs
+# Local databases, backups, and logs
 *.db
-*.db-journal
+*.db-*
+*.db.backup
+*.sqlite
 *.sqlite3
 *.log
 *.jsonl
 
-# Streamlit config / cache
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Streamlit configuration and cache
 .streamlit/
+
+# Test, coverage, and lint artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
