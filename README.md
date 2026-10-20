@@ -65,14 +65,67 @@ pip install -r requirements.txt
 
 ## Configuration
 
-SentinelAPI supports these environment variables:
+SentinelAPI uses environment variables for database paths and JWT authentication.
 
 | Variable | Purpose | Default |
 |---|---|---|
 | `SENTINEL_DB_PATH` | SQLite database location | `telemetry.db` in the project directory |
 | `SENTINEL_OPENAPI_PATH` | OpenAPI specification location | `openapi.json` in the project directory |
+| `SENTINEL_JWT_SECRET` | Secret used to sign and verify HS256 JWTs | Required; no default |
+| `SENTINEL_JWT_ISSUER` | Expected JWT issuer | `sentinelapi-local` |
+| `SENTINEL_JWT_AUDIENCE` | Expected JWT audience | `sentinelapi` |
 
-For a PowerShell session, for example:
+### Configure the JWT secret
+
+For local development in PowerShell, generate a random secret and configure the JWT settings:
+
+```powershell
+$env:SENTINEL_JWT_SECRET = python -c "import secrets; print(secrets.token_urlsafe(32))"
+$env:SENTINEL_JWT_ISSUER = "sentinelapi-local"
+$env:SENTINEL_JWT_AUDIENCE = "sentinelapi"
+```
+
+Keep the secret private. These environment variables apply to the current PowerShell session. Set them again in each new terminal before starting the API or running scripts that require authentication.
+
+The application requires a JWT secret of at least 32 bytes. If the secret is missing or too short, authenticated API requests fail with `503 Service Unavailable`.
+
+### Generate a local development token
+
+For demonstration purposes only, you can generate a short-lived token using the configured secret. Ensure `PyJWT` is installed.
+
+```powershell
+@'
+import os
+import time
+import jwt
+
+now = int(time.time())
+claims = {
+    "sub": "student-demo",
+    "iss": os.environ["SENTINEL_JWT_ISSUER"],
+    "aud": os.environ["SENTINEL_JWT_AUDIENCE"],
+    "iat": now,
+    "exp": now + 300,
+}
+print(jwt.encode(
+    claims,
+    os.environ["SENTINEL_JWT_SECRET"],
+    algorithm="HS256",
+))
+'@ | python
+```
+
+This prints a token valid for five minutes. Use it as a Bearer token when testing protected endpoints:
+
+```http
+Authorization: Bearer <your-generated-token>
+```
+
+The API validates the token signature, issuer, audience, and expiration. Actor identity is derived from the verified `sub` claim; the `X-Actor-ID` header does not establish identity.
+
+This local token-generation example is for development and testing, not a replacement for a production identity provider. Do not commit secrets or real tokens to the repository.
+
+For example, a custom database path can be configured in PowerShell:
 
 ```powershell
 $env:SENTINEL_DB_PATH = "D:\SentinelData\telemetry.db"

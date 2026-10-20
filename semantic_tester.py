@@ -1,7 +1,11 @@
+
 import json
+import os
 import sqlite3
+import time
 from datetime import UTC, datetime
 
+import jwt
 import requests
 
 from config import DB_PATH, SPEC_PATH
@@ -11,36 +15,83 @@ DB_FILE = str(DB_PATH)
 SPEC_FILE = str(SPEC_PATH)
 BASE_URL = "http://127.0.0.1:8000"
 
+JWT_SECRET = os.getenv("SENTINEL_JWT_SECRET", "")
+JWT_ISSUER = os.getenv("SENTINEL_JWT_ISSUER", "sentinelapi-local")
+JWT_AUDIENCE = os.getenv("SENTINEL_JWT_AUDIENCE", "sentinelapi")
 
-def init_semantic_db():
-    init_db()
+
+def make_token(subject: str) -> str:
+    """Create a short-lived JWT for a local security demonstration."""
+    if len(JWT_SECRET.encode("utf-8")) < 32:
+        raise RuntimeError(
+            "SENTINEL_JWT_SECRET must be set to a secret of at least "
+            "32 bytes. Configure it in PowerShell before running this script."
+        )
+
+    now = int(time.time())
+    claims = {
+        "sub": subject,
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+        "iat": now,
+        "exp": now + 300,
+    }
+    return jwt.encode(claims, JWT_SECRET, algorithm="HS256")
+
+
+def send_test_request(
+    method: str,
+    path: str,
+    subject: str,
+    extra_headers: dict | None = None,
+) -> requests.Response:
+    """Send a semantic security test using a valid JWT."""
+    headers = {
+        "Authorization": f"Bearer {make_token(subject)}",
+        "X-Actor-ID": subject,
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+
+    return requests.request(
+        method,
+        f"{BASE_URL}{path}",
+        headers=headers,
+        timeout=5,
+    )
 
 
 def run_semantic_tests():
-    init_semantic_db()
-    with open(SPEC_FILE) as f:
-        spec = json.load(f)
+    init_db()
+
+    with open(SPEC_FILE, encoding="utf-8") as spec_file:
+        spec = json.load(spec_file)
 
     results = []
     paths = spec.get("paths", {})
 
     for path, methods in paths.items():
         if "{user_id}" in path and "get" in methods:
-            target_url = f"{BASE_URL}{path.replace('{user_id}', '2')}"
-            headers = {
-                "Authorization": "Bearer token_user_1",
-                "X-Actor-ID": "semantic_fuzzer_user_1",
-                "X-User-Role": "standard",
-                "X-Authenticated-User-ID": "1",
-            }
-            resp = requests.get(target_url, headers=headers)
-            is_vuln = 1 if resp.status_code == 200 else 0
-            evidence = (
-                f"CRITICAL BOLA: User 1 accessed User 2's private record "
-                f"(HTTP {resp.status_code})"
-                if is_vuln
-                else f"Secure: Access denied with HTTP {resp.status_code}"
+            target_path = path.replace("{user_id}", "2")
+            resp = send_test_request(
+                "GET",
+                target_path,
+                "semantic_fuzzer_user_1",
+                {
+                    "X-User-Role": "standard",
+                    "X-Authenticated-User-ID": "1",
+                },
             )
+
+            is_vuln = int(resp.status_code == 200)
+            evidence = (
+                f"Potential BOLA: User 1 received User 2's resource "
+                f"(HTTP {resp.status_code}); verify response contents."
+                if is_vuln
+                else f"Request did not return HTTP 200 "
+                f"(HTTP {resp.status_code}); review response to confirm security."
+            )
+
             results.append(
                 (
                     datetime.now(UTC).isoformat(),
@@ -59,20 +110,24 @@ def run_semantic_tests():
         ("DELETE", "/api/v1/debug/reset-cache", "Admin Cache Purge"),
         ("GET", "/api/v1/legacy-admin-export", "Admin Database Export"),
     ]
+
     for method, path, desc in bfla_targets:
-        headers = {
-            "Authorization": "Bearer token_low_priv_user",
-            "X-Actor-ID": "semantic_fuzzer_low_priv",
-            "X-User-Role": "guest",
-        }
-        resp = requests.request(method, f"{BASE_URL}{path}", headers=headers)
-        is_vuln = 1 if resp.status_code == 200 else 0
-        evidence = (
-            f"CRITICAL BFLA: Low-privilege 'guest' role executed "
-            f"'{desc}' (HTTP {resp.status_code})"
-            if is_vuln
-            else f"Secure: Function blocked with HTTP {resp.status_code}"
+        resp = send_test_request(
+            method,
+            path,
+            "semantic_fuzzer_low_priv",
+            {"X-User-Role": "guest"},
         )
+
+        is_vuln = int(resp.status_code == 200)
+        evidence = (
+            f"Potential BFLA: Low-privilege test identity received HTTP 200 "
+            f"for '{desc}'; verify the response and side effects."
+            if is_vuln
+            else f"Request did not return HTTP 200 for '{desc}' "
+            f"(HTTP {resp.status_code}); review response to confirm security."
+        )
+
         results.append(
             (
                 datetime.now(UTC).isoformat(),
@@ -87,22 +142,24 @@ def run_semantic_tests():
             )
         )
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.executemany(
-        """
-        INSERT INTO semantic_test_results (
-            timestamp, test_type, endpoint, method, actor_used,
-            target_resource, status_code, vulnerable, evidence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """,
-        results,
-    )
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.executemany(
+            """
+            INSERT INTO semantic_test_results (
+                timestamp, test_type, endpoint, method, actor_used,
+                target_resource, status_code, vulnerable, evidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            results,
+        )
+
     return len(results)
 
 
 if __name__ == "__main__":
-    count = run_semantic_tests()
-    print(f"Executed {count} schema-aware semantic security tests.")
+    try:
+        count = run_semantic_tests()
+        print(f"Executed {count} schema-aware semantic security tests.")
+    except (requests.RequestException, RuntimeError, OSError, ValueError) as exc:
+        print(f"Semantic tests could not complete: {exc}")
+        raise SystemExit(1) from exc
