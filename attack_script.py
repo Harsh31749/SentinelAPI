@@ -95,8 +95,10 @@ def send_request(
 
 
 
+
 def simulate_traffic():
-    print("1. Generating 120 baseline normal requests...")
+    print("Generating interleaved benign and attack traffic...")
+
     normal_endpoints = [
         ("GET", "/api/v1/users"),
         ("GET", "/api/v1/products"),
@@ -106,41 +108,55 @@ def simulate_traffic():
         ("GET", "/api/v1/users/12"),
     ]
 
-    for i in range(120):
-        method, path = random.choice(normal_endpoints)
-        send_request(
-            method,
-            path,
-            f"normal_user_{i % 5}",
-            is_attack=False,
-        )
-        time.sleep(0.01)
-
-    print("2. Simulating Shadow API discovery and exploitation...")
     shadow_targets = [
         ("GET", "/api/v1/legacy-admin-export"),
         ("DELETE", "/api/v1/debug/reset-cache"),
     ]
 
+    # Build a schedule with 120 benign requests and 38 attack requests.
+    events = []
+
+    for i in range(120):
+        method, path = random.choice(normal_endpoints)
+        events.append(
+            (
+                method,
+                path,
+                f"normal_user_{i % 5}",
+                False,
+            )
+        )
+
     for _ in range(8):
         method, path = random.choice(shadow_targets)
-        send_request(
-            method,
-            path,
-            "attacker_shadow_scanner",
-            is_attack=True,
+        events.append(
+            (method, path, "attacker_shadow_scanner", True)
         )
 
-    print("3. Simulating rapid BOLA ID enumeration and scraping burst...")
     for user_id in range(45, 75):
-        send_request(
-            "GET",
-            f"/api/v1/users/{user_id}",
-            "attacker_bola_scraper",
-            is_attack=True,
+        events.append(
+            (
+                "GET",
+                f"/api/v1/users/{user_id}",
+                "attacker_bola_scraper",
+                True,
+            )
         )
 
-    print("Traffic simulation complete!")
+    # Shuffle the schedule so attacks aren't one final contiguous block.
+    random.shuffle(events)
+
+    for index, (method, path, subject, is_attack) in enumerate(events, 1):
+        send_request(method, path, subject, is_attack)
+        time.sleep(0.01)
+
+        if index % 20 == 0:
+            print(f"Processed {index}/{len(events)} requests")
+
+    print(
+        f"Traffic simulation complete: {len(events)} requests "
+        "(120 benign, 38 attack)."
+    )
 
 
 if __name__ == "__main__":
