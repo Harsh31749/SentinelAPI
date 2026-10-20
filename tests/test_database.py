@@ -57,7 +57,7 @@ def test_migration_preserves_legacy_telemetry(tmp_path):
             SELECT version FROM schema_migrations ORDER BY version
         """).fetchall()
 
-        assert versions == [(1,), (2,)]
+        assert versions == [(1,), (2,), (3,), (4,)]
 
 
 def test_init_db_is_idempotent(tmp_path):
@@ -78,7 +78,7 @@ def test_init_db_is_idempotent(tmp_path):
             """)
         }
 
-    assert versions == [(1,), (2,)]
+    assert versions == [(1,), (2,), (3,), (4,)]
     assert {
         "api_logs",
         "gateway_policies",

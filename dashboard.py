@@ -76,10 +76,18 @@ c1.metric("Total API Events", len(df))
 c2.metric("Shadow API Hits", int(df["is_shadow"].sum()))
 c3.metric("AI Anomalies (IF + AE)", int(df["is_anomaly"].sum()))
 c4.metric("High / Critical Alerts", int((df["risk_score"] >= 50).sum()))
-c5.metric(
-    "Confirmed BOLA/BFLA Flaws",
-    int(sem_df["vulnerable"].sum()) if not sem_df.empty else 0,
+unique_findings = (
+    sem_df.loc[
+        sem_df["vulnerable"] == 1,
+        ["test_type", "endpoint", "method"],
+    ]
+    .drop_duplicates()
+    .shape[0]
+    if not sem_df.empty
+    else 0
 )
+
+c5.metric("Unique Potential BOLA/BFLA Findings", unique_findings)
 
 st.divider()
 
@@ -260,27 +268,103 @@ with tab5:
         use_container_width=True,
     )
 
+
+
 with tab6:
     st.subheader("Benchmark Evaluation & Model Comparison")
-    y_true = df["ground_truth"]
-    y_pred = (df["risk_score"] >= 50).astype(int)
 
-    if y_true.nunique() > 1:
-        prec = precision_score(y_true, y_pred, zero_division=0)
-        rec = recall_score(y_true, y_pred, zero_division=0)
-        f1 = f1_score(y_true, y_pred, zero_division=0)
-        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    st.caption(
+        "Evaluation uses explicitly labelled attack_simulator traffic "
+        "and predicts an attack when risk_score >= 50."
+    )
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Precision", f"{prec:.2%}")
-        m2.metric("Recall (Detection Rate)", f"{rec:.2%}")
-        m3.metric("F1-Score", f"{f1:.2%}")
-        m4.metric("False Positive Rate", f"{fpr:.2%}")
-
-        cm_df = pd.DataFrame(
-            [[tp, fn], [fp, tn]],
-            index=["Actual Attack / Shadow API", "Actual Benign Traffic"],
-            columns=["Predicted High Risk (Alert)", "Predicted Normal"],
+    if "traffic_source" not in df.columns:
+        st.warning(
+            "The traffic_source column is missing. "
+            "Run the database migrations and reload the dashboard."
         )
-        st.table(cm_df)
+    else:
+        benchmark_df = df[
+            (df["traffic_source"] == "attack_simulator")
+            & df["request_id"].notna()
+            & (df["request_id"].astype(str).str.strip() != "")
+        ].copy()
+
+        if benchmark_df.empty:
+            st.info(
+                "No attack_simulator records are available yet. "
+                "Run the benchmark harness after trusted labels are configured."
+            )
+        else:
+            y_true = benchmark_df["ground_truth"].astype(int)
+            y_pred = (benchmark_df["risk_score"] >= 50).astype(int)
+
+            st.warning(
+                "These results are provisional. The selected events have "
+                "request IDs correlated by the local simulator harness, but "
+                "the labels and risk threshold have not been independently "
+                "validated on a held-out test set. Do not interpret these "
+                "metrics as production detection accuracy."
+            )
+
+            if y_true.nunique() < 2:
+                st.info(
+                    "Metrics are withheld because the selected data does "
+                    "not contain both benign (0) and attack (1) labels. "
+                    "This prevents misleading precision, recall, F1, and "
+                    "false-positive-rate results."
+                )
+                st.metric("Simulator Events", len(benchmark_df))
+                st.metric(
+                    "High-Risk Simulator Events",
+                    int((benchmark_df["risk_score"] >= 50).sum()),
+                )
+            else:
+                tn, fp, fn, tp = confusion_matrix(
+                    y_true,
+                    y_pred,
+                    labels=[0, 1],
+                ).ravel()
+
+                precision = precision_score(
+                    y_true, y_pred, zero_division=0
+                )
+                recall = recall_score(
+                    y_true, y_pred, zero_division=0
+                )
+                f1 = f1_score(
+                    y_true, y_pred, zero_division=0
+                )
+
+                benign_total = tn + fp
+                false_positive_rate = (
+                    fp / benign_total if benign_total else 0.0
+                )
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Precision", f"{precision:.2%}")
+                m2.metric("Recall (Detection Rate)", f"{recall:.2%}")
+                m3.metric("F1-Score", f"{f1:.2%}")
+                m4.metric(
+                    "False Positive Rate",
+                    f"{false_positive_rate:.2%}",
+                )
+
+                cm_df = pd.DataFrame(
+                    [[tp, fn], [fp, tn]],
+                    index=["Actual Attack", "Actual Benign"],
+                    columns=[
+                        "Predicted High Risk",
+                        "Predicted Normal",
+                    ],
+                )
+
+                st.markdown("#### Confusion Matrix")
+                st.table(cm_df)
+
+                st.caption(
+                    f"Events evaluated: {len(benchmark_df)} | "
+                    f"Actual attacks: {int((y_true == 1).sum())} | "
+                    f"Actual benign: {int((y_true == 0).sum())} | "
+                    "High-risk threshold: 50"
+                )

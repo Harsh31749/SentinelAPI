@@ -66,9 +66,46 @@ def migration_2_add_autoencoder_mse(
         """)
 
 
+def migration_3_add_traffic_source(
+    conn: sqlite3.Connection,
+) -> None:
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(api_logs)")
+    }
+
+    if "traffic_source" not in columns:
+        conn.execute("""
+            ALTER TABLE api_logs
+            ADD COLUMN traffic_source TEXT NOT NULL DEFAULT 'legacy'
+        """)
+
+
+def migration_4_add_request_id(
+    conn: sqlite3.Connection,
+) -> None:
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(api_logs)")
+    }
+
+    if "request_id" not in columns:
+        conn.execute("""
+            ALTER TABLE api_logs
+            ADD COLUMN request_id TEXT
+        """)
+
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_api_logs_request_id
+        ON api_logs(request_id)
+        WHERE request_id IS NOT NULL
+    """)
+
+
 MIGRATIONS = [
     (1, migration_1_create_tables),
     (2, migration_2_add_autoencoder_mse),
+    (3, migration_3_add_traffic_source),
+    (4, migration_4_add_request_id),
 ]
 
 

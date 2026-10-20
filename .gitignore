@@ -16,6 +16,7 @@ venv/
 *.sqlite3
 *.log
 *.jsonl
+*.bak
 
 # Environment secrets
 .env
